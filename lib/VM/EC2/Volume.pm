@@ -45,7 +45,7 @@ The following object methods are supported:
  createTime       -- Timestamp for when volume was created.
  volumeType       -- The volume type, one of "standard", "io1", or "gp2"
  iops             -- The number of I/O operations per second that the volume
-                     supports, an integer between 100 and 4000. Only valid for
+                     supports, an integer between 100 and 20000. Only valid for
                      volumes of type "io1".
  encrypted        -- True if volume is encrypted.
  tags             -- Hashref containing tags associated with this group.

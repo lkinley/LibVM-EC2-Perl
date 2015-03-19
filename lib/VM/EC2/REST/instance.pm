@@ -289,7 +289,7 @@ following:
             "gp2" is the new general purpose SSD type.
 
          - '<iops>': The number of I/O operations per second (IOPS) that
-           the volume suports. A number between 100 to 4000. Only valid
+           the volume suports. A number between 100 to 20000. Only valid
            for volumes of type "io1".
           
          Examples: -block_devices => '/dev/sdb=snap-7eb96d16'

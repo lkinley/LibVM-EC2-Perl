@@ -104,7 +104,9 @@ Arguments:
 
  -snapshot_id          -- ID of a snapshot to use to build volume from.
 
- -size                 -- Size of the volume, in GB (between 1 and 1024).
+ -size                 -- Size of the volume, in GB.
+                          gp2, io1: between 1 and 16384
+                          standard: between 1 and 1024
 
 One or both of -snapshot_id or -size are required. For convenience,
 you may abbreviate -availability_zone as -zone, and -snapshot_id as
@@ -116,7 +118,7 @@ Optional Arguments:
                           Default is "standard"
 
  -iops                 -- The number of I/O operations per second (IOPS) that
-                          the volume supports.  Range is 100 to 4000.  Required
+                          the volume supports.  Range is 100 to 20000.  Required
                           when volume type is io1.  IOPS must be 30-to-1 ratio
                           to size.  ie: 3000 IOPS volume must be at least 100GB.
 

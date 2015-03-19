@@ -131,18 +131,20 @@ Create a new volume from this snapshot. Arguments are:
  -availability_zone    -- An availability zone from
                           describe_availability_zones (required)
 
- -size                 -- Size of the volume, in GB (between 1 and 1024).
+ -size                 -- Size of the volume, in GB.
+                          io1, gp2: between 1 and 16384
+                          standard: between 1 and 1024
 
 If -size is not provided, then the new volume will have the same size as
 the snapshot. 
 
 Optional Arguments:
 
- -volume_type          -- The volume type.  standard or io1, default is
+ -volume_type          -- The volume type.  standard, gp2, or io1, default is
                           standard
 
  -iops                 -- The number of I/O operations per second (IOPS) that
-                          the volume supports.  Range is 100 to 4000.  Required
+                          the volume supports.  Range is 100 to 20000.  Required
                           when volume type is io1.  IOPS must be 30-to-1 ratio
                           to size.  ie: 3000 IOPS volume must be at least 100GB.
 

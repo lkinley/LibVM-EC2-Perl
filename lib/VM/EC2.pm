@@ -331,123 +331,6 @@ following caveats apply:
     You may also elect to raise an exception when an error occurs.
     See the new() method for details.
 
-=head1 ASYNCHRONOUS CALLS
-
-As of version 1.24, VM::EC2 supports asynchronous calls to AWS using
-AnyEvent::HTTP. This allows you to make multiple calls in parallel for
-a significant improvement in performance.
-
-In asynchronous mode, VM::EC2 calls that ordinarily wait for AWS to
-respond and then return objects corresponding to EC2 instances,
-volumes, images, and so forth, will instead immediately return an
-AnyEvent condition variable. You can retrieve the result of the call
-by calling the condition variable's recv() method, or by setting a
-callback to be executed when the call is complete.
-
-To make an asynchronous call, you can set the global variable
-$VM::EC2::ASYNC to a true value
-
-Here is an example of a normal synchronous call:
-  
- my @instances = $ec2->describe_instances();
-
-Here is the asynchronous version initiated after setting
-$VM::EC2::ASYNC (using a local block to limit its effects).
-
- {
-    local $VM::EC2::ASYNC=1;
-    my $cv = $ec2->describe_instances();   # returns immediately
-    my @instances = $cv->recv;
- }
-
-In case of an error recv() will return undef and the error object can
-be recovered using the condition variable's error() method (this is an
-enhancement over AnyEvent's standard condition variable class):
-
- my @instances = $cv->recv 
-    or die "No instances found! error = ",$cv->error();
-
-You may attach a callback CODE reference to the condition variable using
-its cb() method, in which case the callback will be invoked when the
-APi call is complete. The callback will be invoked with a single
-argument consisting of the condition variable. Ordinarily you will
-call recv() on the variable and then do something with the result:
-
- {
-   local $VM::EC2::ASYNC=1;
-   my $cv = $ec2->describe_instances();
-   $cv->cb(sub {my $v = shift;
-                my @i = $v->recv;
-                print "instances = @i\n"; 
-                });
-  }
-
-For callbacks to be invoked, someone must be run an event loop
-using one of the event frameworks that AnyEvent supports (e.g. Coro,
-Tk or Gtk). Alternately, you may simply run:
-
- AnyEvent->condvar->recv();
- 
-If $VM::EC2::ASYNC is false, you can issue a single asynchronous call
-by appending "_async" to the name of the method call. Similarly, if
-$VM::EC2::ASYNC is true, you can make a single normal synchrous call
-by appending "_sync" to the method name.
-
-For example, this is equivalent to the above:
-
- my $cv = $ec2->describe_instances_async();  # returns immediately
- my @instances = $cv->recv;
-
-You may stack multiple asynchronous calls on top of one another. When
-you call recv() on any of the returned condition variables, they will
-all run in parallel. Hence the three calls will take no longer than
-the longest individual one:
-
- my $cv1 = $ec2->describe_instances_async({'instance-state-name'=>'running'});
- my $cv2 = $ec2->describe_instances_async({'instance-state-name'=>'stopped'});
- my @running = $cv1->recv;
- my @stopped = $cv2->recv;
-
-Same thing with callbacks:
-
- my (@running,@stopped);
- my $cv1 = $ec2->describe_instances_async({'instance-state-name'=>'running'});
- $cv1->cb(sub {@running = shift->recv});
-
- my $cv2 = $ec2->describe_instances_async({'instance-state-name'=>'stopped'});
- $cv1->cb(sub {@stopped = shift->recv});
-
- AnyEvent->condvar->recv;
-
-And here it is using a group conditional variable to block until all
-pending describe_instances() requests have completed:
-
- my %instances;
- my $group = AnyEvent->condvar;
- $group->begin;
- for my $state (qw(pending running stopping stopped)) {
-    $group->begin;
-    my $cv = $ec2->describe_instances_async({'instance-state-name'=>$state});
-    $cv->cb(sub {my @i = shift->recv;
-                 $instances{$state}=\@i;
-                 $group->end});
- }
- $group->recv;
- # when we get here %instances will be populated by all instances,
- # sorted by their state.
-
-If this looks mysterious, please consult L<AnyEvent> for full
-documentation and examples.
-
-Lastly, be advised that some of the objects returned by calls to
-VM::EC2, such as the VM::EC2::Instance object, will make their own
-calls into VM::EC2 for certain methods. Some of these methods will
-block (be synchronous) of necessity, even if you have set
-$VM::EC2::ASYNC. For example, the instance object's current_status()
-method must block in order to update the object and return the current
-status. Other object methods may behave unpredictably in async
-mode. Caveat emptor!
-
 =head1 API GROUPS
 
 The extensive (and growing) Amazon API has many calls that you may
@@ -572,15 +455,12 @@ use strict;
 use VM::EC2::Dispatch;
 use VM::EC2::ParmParser;
 eval "require AWS::Signature4"; # optional
-
 use MIME::Base64 qw(encode_base64 decode_base64);
 use Digest::SHA qw(hmac_sha256 sha1_hex sha256_hex);
 use POSIX 'strftime';
 use URI;
 use URI::Escape;
-use AnyEvent;
-use AnyEvent::HTTP;
-use AnyEvent::CacheDNS ':register';
+use LWP::UserAgent;
 use HTTP::Request::Common;
 use VM::EC2::Error;
 use Carp 'croak','carp';
@@ -589,12 +469,11 @@ use File::HomeDir;
 use File::Spec;
 use Config::IniFiles;
 
-our $VERSION = '1.28';
+our $VERSION = '1.28.1';
 our $AUTOLOAD;
 our @CARP_NOT = qw(VM::EC2::Image    VM::EC2::Volume
                    VM::EC2::Snapshot VM::EC2::Instance
                    VM::EC2::ReservedInstance);
-our $ASYNC;
 
 # hard-coded timeout for several wait_for_terminal_state() calls.
 use constant WAIT_FOR_TIMEOUT => 600;
@@ -605,20 +484,10 @@ sub AUTOLOAD {
     return if $func_name eq 'DESTROY';
     my $proper = VM::EC2->canonicalize($func_name);
     $proper =~ s/^-//;
-
-    my $async;
-    if ($proper =~ /^(\w+)_(a?sync)$/i) {
-	$proper = $1;
-	$async  = $2 eq 'async' ? 1 : 0;
-    }
-
     if ($self->can($proper)) {
-	my $local = defined $async ? "local \$ASYNC=$async;" : '';
-	eval "sub $pack\:\:$func_name {$local shift->$proper(\@_)}; 1" or die $@;
-	$self->$func_name(@_);
-    } 
-
-    else {
+        eval "sub $pack\:\:$func_name {shift->$proper(\@_)}";
+        $self->$func_name(@_);
+    } else {
 	croak "Can't locate object method \"$func_name\" via package \"$pack\"";
     }
 }
@@ -1235,47 +1104,25 @@ sub wait_for_terminal_state {
     my %terminal_state = map {$_=>1} @$terminal_states;
     my %status = ();
     my @pending = grep {defined $_} @$objects; # in case we're passed an undef
-
-    my %timers;
-    my $done = $self->condvar();
-    $done->begin(sub {
-	my $cv = shift;
-	if ($cv->error) {
-	    $self->error($cv->error);
-	    $cv->send();
-	} else {
-	    $cv->send(\%status);
-	}
-		 }
-	);
-    
-    for my $obj (@pending) {
-	$done->begin;
-	my $timer = AnyEvent->timer(interval => 3,
-				    cb       => sub {
-					$obj->current_status_async->cb( 
-					    sub {
-						my $state = shift->recv;
-						if (!$state || $terminal_state{$state}) {
-						    $status{$obj} = $state;
-						    $done->end;
-						    undef $timers{$obj};
-						}})});
-	$timers{$obj} = $timer;
+    my $status = eval {
+        local $SIG{ALRM};
+        if ($timeout && $timeout > 0) {
+            $SIG{ALRM} = sub {die "timeout"};
+            alarm($timeout);
+        }
+        while (@pending) {
+            sleep 3;
+            $status{$_} = $_->current_status foreach @pending;
+            @pending    = grep { !$terminal_state{$status{$_}} } @pending;
+        }
+        alarm(0);
+        \%status;
+    };
+    if ($@ =~ /timeout/) {
+        $self->error('timeout waiting for terminal state');
+        return;
     }
-
-    # timeout
-    my $timeout_event;
-    $timeout_event = AnyEvent->timer(after=> $timeout,
-				     cb   => sub {
-					 undef %timers; # cancel all timers
-					 undef $timeout_event;
-					 $done->error('timeout waiting for terminal state');
-					 $done->end foreach @pending;
-				     }) if $timeout;
-    $done->end;
-
-    return $ASYNC ? $done : $done->recv;
+    return $status;
 }
 
 =head2 $timeout = $ec2->wait_for_timeout([$new_timeout]);
@@ -1794,169 +1641,97 @@ sub _parse_credentials_file {
 Make a call to Amazon using $action and the passed arguments, and
 return a list of objects.
 
-if $VM::EC2::ASYNC is set to true, then will return a
-AnyEvent::CondVar object instead of a list of objects. You may
-retrieve the objects by calling recv() or setting a callback:
-
-    $VM::EC2::ASYNC = 1;
-    my $cv  = $ec2->call('DescribeInstances');
-    my @obj = $cv->recv;
-
-or 
-
-    $VM::EC2::ASYNC = 1;
-    my $cv  = $ec2->call('DescribeInstances');
-    $cv->cb(sub { my @objs = shift->recv;
-                  do_something(@objs);
-                });
-
 =cut
 
 sub call {
-    my $self = shift;
-    return $ASYNC ? $self->_call_async(@_) : $self->_call_sync(@_);
-}
-sub _call_sync {
-    my $self = shift;
-    my $cv   = $self->_call_async(@_);
-    my @obj  = $cv->recv;
-    $self->error($cv->error) if $cv->error;
+    my $self    = shift;
+    my $action  = shift;
+    print "$action: ",join(',',@_),"\n" if $ENV{EC2_API_DEBUG};
+    my $response  = $self->make_request($action,@_);
+
+    my $sleep_time = 2;
+    while ($response->decoded_content =~ 'RequestLimitExceeded') {
+        last if ($sleep_time > 64); # wait at most 64 seconds
+        sleep $sleep_time;
+        $sleep_time *= 2;
+        $response  = $self->make_request($action,@_);
+    }
+    my $content = $response->decoded_content;
+    unless ($response->is_success) {
+        my $error;
+        if ($content =~ /<Response>/) {
+            $error = VM::EC2::Dispatch->create_error_object($response->decoded_content,$self,$action);
+        } elsif ($content =~ /<ErrorResponse xmlns="http:\/\//) {
+            $error = VM::EC2::Dispatch->create_alt_error_object(response->decoded_content,$self,$action);
+        } else {
+            my $code = $response->status_line;
+            my $msg  = $response->decoded_content;
+            $error = VM::EC2::Error->new({Code=>$code,Message=>"$msg, at API call '$action')"},$self);
+        }
+        $self->error($error);
+        carp  "$error" if $self->print_error;
+        croak "$error" if $self->raise_error;
+        return;
+    }
+
+    $self->error(undef);
+    my @obj = VM::EC2::Dispatch->content2objects($action,$content,$self);
+
+    # slight trick here so that we return one object in response to
+    # describe_images(-image_id=>'foo'), rather than the number "1"
     if (!wantarray) { # scalar context
-	return $obj[0] if @obj == 1;
-	return         if @obj == 0;
-	return @obj;
+        return $obj[0] if @obj == 1;
+        return         if @obj == 0;
+        return @obj;
     } else {
-	return @obj;
+        return @obj;
     }
 }
 
-sub _call_async {
-    my $self  = shift;
-    my ($action,@param) = @_;
+=head2 $request = $ec2->make_request($action,@param);
 
-    # called if AWS::Signature4 NOT present; use built-in method
+Set up the signed HTTP::Request object.
+
+=cut
+
+sub make_request {
+    my $self    = shift;
+    my ($action,@args) = @_;
+    my $request;
     unless (AWS::Signature4->can('new')) {
-	my ($action,@param) = @_;
-	my $post  = $self->_signature(Action=>$action,@param);
-	my $u     = URI->new($self->endpoint);
-	$u->query_form(@$post);
-	return $self->async_post($action,POST($self->endpoint,Content=>$u->query));
-    }
-
-
-    # called if AWS::Signature4 IS present; use external module
-    my $request = POST($self->endpoint,
-		       'content-type'=>'application/x-www-form-urlencoded',
-		       Content => [
-			   Action  => $action,
-			   Version => $self->version,
-			   @param
-		       ]);
-    my $access_key = $self->access_key;
-    my $secret_key = $self->secret;
-    my $host       = URI->new($self->endpoint)->host;
-    $request->header('x-amz-security-token'=>$self->security_token) if $self->security_token;
-    $request->header('user-agent' => 'VM::EC2-perl');
-    $request->header('action'     => $action);  # maybe not necessary, but docs say it is!
-    $request->header('host'       => $host);
-    
-    AWS::Signature4->new(-access_key=>$access_key,
-			 -secret_key=>$secret_key)->sign($request);
-    $self->async_post($action,$request);
-}
-
-sub async_post {
-    my $self = shift;
-    $self->async_request('POST',@_);
-}
-
-sub async_get {
-    my $self = shift;
-    $self->async_request('GET',@_);
-}
-
-sub async_put {
-    my $self = shift;
-    $self->async_request('PUT',@_);
-}
-
-sub async_delete {
-    my $self = shift;
-    $self->async_request('DELETE',@_);
-}
-
-sub async_request {
-    my $self = shift;
-    my ($method,$action,$request) = @_;
-
-    my @headers;
-    $request->headers->scan(sub {push @headers,@_});
-
-    my $cv    = $self->condvar;
-    my $callback = sub {
-	my $timer = shift;
-	http_request(
-	    $method => $request->uri,
-	    body    => $request->content,
-	    headers => {
-		TE      => undef,
-		Referer => undef,
-		@headers,
-	    },
-	    sub {
-		my ($body,$hdr) = @_;
-		if ($hdr->{Status} !~ /^2/) { # an error
-		    if ($body =~ /RequestLimitExceeded/) {
-			warn "RequestLimitExceeded. Retry in ",$timer->next_interval()," seconds\n";
-			$timer->retry();
-			return;
-		    } else {
-			$self->async_send_error($action,$hdr,$body,$cv);
-			$timer->success();
-			return;
-		    }
-		} else { # success
-		    $self->error(undef);
-		    my @obj = VM::EC2::Dispatch->content2objects($action,$body,$self);
-		    $cv->send(@obj);
-		    $timer->success();
-		}
-	    })
-    };
-    RetryTimer->new(on_retry       => $callback,
-		    interval       => 1,
-		    max_retries    => 12,
-		    on_max_retries => sub { $cv->error(VM::EC2::Error->new({Code=>500,Message=>'RequestLimitExceeded'},$self)) });
-
-    return $cv;
-}
-
-sub async_send_error {
-    my $self = shift;
-    my ($action,$hdr,$body,$cv) = @_;
-    my $error;
-
-    if ($body =~ /<Response>/) {
-	$error = VM::EC2::Dispatch->create_error_object($body,$self,$action);
-    } elsif ($body =~ /<ErrorResponse xmlns="http:\/\//) {
-        $error = VM::EC2::Dispatch->create_alt_error_object($body,$self,$action);
+	$request = $self->_sign(Action=>$action,@args);
     } else {
-	my $code = $hdr->{Status};
-        my $msg  = $code =~ /^59[0-9]/ ? $hdr->{Reason} : $body;
-	$error = VM::EC2::Error->new({Code=>$code,Message=>"$msg, at API call '$action')"},$self);
+	    # called if AWS::Signature4 IS present; use external module
+	    $request = POST($self->endpoint,
+			       'content-type'=>'application/x-www-form-urlencoded',
+			       Content => [
+				   Action  => $action,
+				   Version => $self->version,
+				   @args
+			       ]);
+	    my $access_key = $self->access_key;
+	    my $secret_key = $self->secret;
+	    my $host       = URI->new($self->endpoint)->host;
+	    $request->header('x-amz-security-token'=>$self->security_token) if $self->security_token;
+	    $request->header('user-agent' => 'VM::EC2-perl');
+	    $request->header('action'     => $action);  # maybe not necessary, but docs say it is!
+	    $request->header('host'       => $host);
+	    
+	    AWS::Signature4->new(-access_key=>$access_key,
+				 -secret_key=>$secret_key)->sign($request);
     }
+    return $self->ua->request($request);
+}
 
-    $cv->error($error);
+=head2 $ua = $ec2->ua
 
-    # this is probably not want we want to do, because it will cause error messages to
-    # appear in random places nested into some deep callback.
-    carp  "$error"     if $self->print_error;
+LWP::UserAgent object.
 
-    if ($self->raise_error) {
-	$cv->croak($error);
-    } else {
-	$cv->send;
-    }
+=cut
+
+sub ua {
+    my $self = shift;
+    return $self->{ua} ||= LWP::UserAgent->new;
 }
 
 sub signin_call {
@@ -2084,106 +1859,6 @@ sub args {
     return @_ if $_[0] =~ /^-/;
     return (-filter=>shift) if @_==1 && ref $_[0] && ref $_[0] eq 'HASH';
     return ($default_param_name => \@_);
-}
-
-sub condvar {
-    bless AnyEvent->condvar,'VM::EC2::CondVar';
-}
-
-# utility - retry a call with exponential backoff until it succeeds
-package RetryTimer;
-use AnyEvent;
-use Carp 'croak';
-
-# try a subroutine multiple times with exponential backoff
-# until it succeeds. Subroutine must call timer's success() method
-# if it succeds, retry() otherwise.
-
-# Arguments
-# on_retry=>CODEREF,
-# on_max_retries=>CODEREF,
-# interval => $seconds,    # defaults to 1
-# multiplier=>$fraction,   # defaults to 1.5
-# max_retries=>$integer,   # defaults to 10
-sub new {
-    my $class    = shift;
-    my @args     = @_;
-
-    my $self;
-    $self = bless {
-	timer => AE::timer(0,0, sub {
-	    delete $self->{timer};
-	    $self->{on_retry}->($self) if $self->{on_retry};
-	}),
-	tries            => 0,
-	current_interval => 0,
-	@args,
-    },ref $class || $class;
-
-    croak "need a on_retry argument" unless $self->{on_retry};
-    $self->{interval}     ||= 1;
-    $self->{multiplier}   ||= 1.5;
-    $self->{max_retries}  = 10 unless defined $self->{max_retries};
-    return $self;
-}
-
-sub retry {
-    my $self = shift;
-    return if $self->{timer};
-    $self->{current_interval} = $self->next_interval;
-    $self->{tries}++; 
-
-    if ($self->{max_retries} && $self->{max_retries} <= $self->{tries}) {
-	delete $self->{timer};
-	delete $self->{current_interval};
-	$self->{on_max_retries}->($self) if $self->{on_max_retries};
-	return;
-    }
-    $self->{timer} = AE::timer ($self->{current_interval},0,
-				sub {
-				    delete $self->{timer};
-				    $self->{on_retry}->($self)
-					if $self && $self->{on_retry};
-				});
-}
-
-sub next_interval {
-    my $self = shift;
-    if ($self->{current_interval}) {
-	return $self->{current_interval} * $self->{multiplier};
-    } else {
-	return $self->{interval};
-    }
-}
-
-sub current_interval { shift->{current_interval} };
-
-sub success {
-    my $self = shift;
-    delete $self->{current_interval};
-    delete $self->{timer};
-}
-
-package VM::EC2::CondVar;
-use base 'AnyEvent::CondVar';
-
-sub error {
-    my $self = shift;
-    my $d    = $self->{error};
-    $self->{error} = shift if @_;
-    return $d;
-}
-
-sub recv {
-    my $self = shift;
-    my @obj  = $self->SUPER::recv;
-    if (!wantarray) { # scalar context
-	return $obj[0] if @obj == 1;
-	return         if @obj == 0;
-	return @obj;
-    } else {
-	return @obj;
-    }
 }
 
 =head1 OTHER INFORMATION

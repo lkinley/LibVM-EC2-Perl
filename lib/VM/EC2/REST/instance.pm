@@ -148,6 +148,10 @@ defaults. Otherwise, the arguments will be taken as a
  
 =item Optional arguments:
 
+  -dry_run           Checks if call would succeed or fail based on
+                     passed arguments.  API call Will returns error
+                     DryRunOperation if command would have succeeded.
+
   -min_count         Minimum number of instances to launch [1]
 
   -max_count         Maximum number of instances to launch [1]
@@ -446,7 +450,7 @@ sub run_instances {
 	list_parm   => [qw(SecurityGroup SecurityGroupId)],
         'Placement.single_parm'   => [qw(AvailabilityZone GroupName Tenancy)],
 	base64_parm => 'UserData',
-	boolean_parm=> [qw(DisableApiTermination EbsOptimized Monitoring.Enabled)],
+	boolean_parm=> [qw(DisableApiTermination DryRun EbsOptimized Monitoring.Enabled)],
 	block_device_parm         => 'BlockDeviceMapping',
 	network_interface_parm    => 'NetworkInterface',
 							   });

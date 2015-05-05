@@ -687,20 +687,6 @@ sub current_status {
     return $self->instanceState;
 }
 
-sub current_status_async {
-    my $self = shift;
-    my $to_caller = VM::EC2->condvar;
-
-    my $cv = $self->aws->describe_instances_async(-instance_id=>$self->instanceId);
-
-    $cv->cb(sub {
-	my $i = shift->recv;
-	$to_caller->send($i->instanceState)
-	    });
-
-    return $to_caller;
-}
-
 sub current_state { shift->current_status } # alias
 sub status        { shift->current_status } # legacy
 
@@ -792,7 +778,7 @@ sub refresh {
     my $self = shift;
     my $i   = shift;
     local $self->aws->{raise_error} = 1;
-    ($i) = $self->aws->describe_instances_sync(-instance_id=>$self->instanceId) unless $i;
+    ($i) = $self->aws->describe_instances(-instance_id=>$self->instanceId) unless $i;
     %$self  = %$i if $i;
     return defined $i;
 }

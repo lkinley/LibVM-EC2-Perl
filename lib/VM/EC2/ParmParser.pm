@@ -51,8 +51,7 @@ sub simple_arglist {
     my $self = shift;
     my ($parameter_name,@args) = @_;
     my %args           = VM::EC2::ParmParser->args(VM::EC2->canonicalize($parameter_name) => @args);
-    my ($async,@param) = VM::EC2::ParmParser->format_parms(\%args,{list_parm => $parameter_name});
-    return ($async,@param);
+    return VM::EC2::ParmParser->format_parms(\%args,{list_parm => $parameter_name});
 }
 
 sub args {

@@ -7,6 +7,8 @@ package VM::EC2;  # add methods to VM::EC2
 VM::EC2::Dispatch->register(
     AcceptVpcPeeringConnection        => 'fetch_one,vpcPeeringConnection,VM::EC2::VPC::PeeringConnection',
     CreateVpc                         => 'fetch_one,vpc,VM::EC2::VPC',
+    CreateVpcEndpoint                 => 'fetch_one,vpcEndpoint,VM::EC2::VPC::Endpoint',
+    DeleteVpcEndpoints                => 'fetch_one,unsuccessful,VM::EC2::VPC::Unsuccessful',
     CreateVpcPeeringConnection        => 'fetch_one,vpcPeeringConnection,VM::EC2::VPC::PeeringConnection',
     DeleteVpc                         => 'boolean',
     DeleteVpcPeeringConnection        => 'boolean',
@@ -34,8 +36,10 @@ extending your home/corporate network into the cloud.
 Implemented:
  AcceptVpcPeeringConnection
  CreateVpc
+ CreateVpcEndpoint
  CreateVpcPeeringConnection
  DeleteVpc
+ DeleteVpcEndpoints
  DeleteVpcPeeringConnection
  DescribeVpcPeeringConnections
  DescribeVpcs
@@ -44,6 +48,10 @@ Implemented:
  RejectVpcPeeringConnection
 
 Unimplemented:
+ DescribePrefixLists
+ DescribeVpcEndpoints
+ DescribeVpcEndpointServices
+ ModifyVpcEndpoint
  (none)
 
 =cut
@@ -124,6 +132,59 @@ sub create_vpc {
             single_parm => 'instanceTenancy',
         });
     return $self->call('CreateVpc',@param);
+}
+
+=head2 $ep = $ec2->create_vpc_endpoint(%args)
+
+Creates a VPC endpoint for a specified AWS service. An endpoint enables creation
+of a private connection between a VPC and another AWS service in the same
+account. An endpoint policy can be attached to the endpoint that will control
+access to the service from the VPC. VPC route tables can be specified that use
+the endpoint.
+
+Required arguments:
+
+ -service_name     The AWS service name, in the form: 
+                   com.amazonaws.<region>.<service>
+                   To get a list of available services, use the
+                   describe_vpc_endpoint_services() call.
+
+ -vpc_id           The ID of the VPC in which the endpoint will be used.
+
+Optional arguments:
+
+ -client_token     Unique, case-sensitive identifier you provide to ensure the
+                   idempotency of the request.
+
+ -dry_run          Checks whether the required permissions for the action are
+                   available, without actually making the request, and provides
+                   an error response. If the required permissions are possessed,
+                   the error response is 'DryRunOperation'. Otherwise, it is
+                   'UnauthorizedOperation'
+
+ -policy_document  A policy to attach to the endpoint that controls access to
+                   the service. The policy must be in valid JSON format. If this
+                   parameter is not specified, a default policy that allows full
+                   access to the service is attached.
+
+ -route_table      One or more route table IDs.  Can be arrayref or scalar.
+
+=cut
+
+sub create_vpc_endpoint {
+    my $self = shift;
+    my %args = @_;
+    $args{-vpc_id} or
+        croak "create_vpc_peering_connection(): -vpc_id argument required";
+    $args{-peer_vpc_id} or
+        croak "create_vpc_peering_connection(): -peer_vpc_id argument required";
+    my @param = $VEP->format_parms(\%args,
+        {
+            boolean_parm => 'DryRun',
+            single_parm => [qw(ClientToken PolicyDocument ServiceName VpcId)],
+            list_parm => 'RouteTableId',
+        });
+    return $self->call('CreateVpcEndpoint',@param);
 }
 
 =head2 $pcx = $ec2->create_vpc_peering_connection(-vpc_id        => $vpc_id,
@@ -252,6 +313,36 @@ sub delete_vpc {
             single_parm => 'VpcId',
         });
     return $self->call('DeleteVpc',@param);
+}
+
+=head2 $success = $ec2->delete_vpc_endpoints(-vpc_endpoint_id => $id, -dry_run => $bool)
+
+Deletes one or more specified VPC endpoints. Deleting the endpoint also deletes
+the endpoint routes in the route tables that were associated with the endpoint.
+
+Required arguments:
+
+ -vpc_endpoint_id  One or more endpoint IDs.  Can be scalar or arrayref.
+
+Optional arguments:
+
+ -dry_run          Checks whether the required permissions for the action are
+                   possessed, without actually making the request, and provides
+                   an error response. If the required permissions are possessed,
+                   the error response is 'DryRunOperation'. Otherwise, it is
+                   'UnauthorizedOperation'.
+
+=cut
+
+sub delete_vpc_endpoints {
+    my $self = shift;
+    my %args = $VEP->args(-vpc_endpoint_id,@_);
+    my @param = $VEP->format_parms(\%args,
+        {
+            list_parm    => 'VpcEndpointId',
+            boolean_parm => 'DryRun',
+        });
+    return $self->call('DeleteVpcEndpoints',@param);
 }
 
 =head2 $success = $ec2->delete_vpc_peering_connection(-vpc_peering_connection_id => $id)
